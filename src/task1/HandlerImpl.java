@@ -1,9 +1,12 @@
 package task1;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 public class HandlerImpl implements Handler {
@@ -17,38 +20,41 @@ public class HandlerImpl implements Handler {
 
     @Override
     public ApplicationStatusResponse performOperation(String id) {
-        CompletableFuture<Result> result =
-                CompletableFuture.supplyAsync(() -> this.getResult(id));
+        AtomicInteger retries = new AtomicInteger(0);
+        AtomicLong duration = new AtomicLong(0);
+
+        CompletableFuture<Response> result =
+                CompletableFuture.supplyAsync(() -> this.getResult(id, retries, duration));
 
         ApplicationStatusResponse response = null;
         try {
-            response = map(result.get(TIMEOUT, TimeUnit.SECONDS));
+            response = map(result.get(TIMEOUT, TimeUnit.SECONDS), retries, duration);
         } catch (InterruptedException | ExecutionException e) {
             throw new RuntimeException(e);
         } catch (TimeoutException e) {
-            response = new ApplicationStatusResponse.Failure(null, 0);
+            response = new ApplicationStatusResponse.Failure(null, retries.get());
         }
 
         return response;
     }
 
-    private ApplicationStatusResponse map(Result result) {
-        if (result.response instanceof Response.Success successResponse) {
+    private ApplicationStatusResponse map(Response result, AtomicInteger retries, AtomicLong duration) {
+        if (result instanceof Response.Success successResponse) {
             return new ApplicationStatusResponse.Success(successResponse.applicationId(), successResponse.applicationStatus());
         } else {
-            return new ApplicationStatusResponse.Failure(null, result.retries);
+            return new ApplicationStatusResponse.Failure(Duration.ofNanos(duration.get()), retries.get());
         }
     }
 
-    private Result getResult(String id) {
-        CompletableFuture<Result> service1Response =
-                CompletableFuture.supplyAsync(retryRequest(() -> client.getApplicationStatus1(id)));
+    private Response getResult(String id, AtomicInteger retries, AtomicLong duration) {
+        CompletableFuture<Response> service1Response =
+                CompletableFuture.supplyAsync(retryRequest(() -> client.getApplicationStatus1(id), retries, duration));
 
-        CompletableFuture<Result> service2Response =
-                CompletableFuture.supplyAsync(retryRequest(() -> client.getApplicationStatus1(id)));
+        CompletableFuture<Response> service2Response =
+                CompletableFuture.supplyAsync(retryRequest(() -> client.getApplicationStatus1(id), retries, duration));
 
         var result = CompletableFuture.anyOf(service1Response, service2Response)
-                .thenApply(it -> (Result) it);
+                .thenApply(it -> (Response) it);
 
         try {
             return result.get();
@@ -57,25 +63,26 @@ public class HandlerImpl implements Handler {
         }
     }
 
-    private Supplier<Result> retryRequest(Supplier<Response> supplier) {
+    private Supplier<Response> retryRequest(Supplier<Response> supplier, AtomicInteger retries, AtomicLong duration) {
         return () -> {
-            int retries = 1;
             try {
+                retries.incrementAndGet();
+                var start = System.nanoTime();
                 var result = supplier.get();
+                duration.set(System.nanoTime() - start);
                 while (!(result instanceof Response.Success)) {
                     if (result instanceof Response.RetryAfter) {
                         Thread.sleep(((Response.RetryAfter) result).delay().toMillis());
                     }
-                    retries++;
+                    retries.incrementAndGet();
+                    start = System.nanoTime();
                     result = supplier.get();
+                    duration.set(System.nanoTime() - start);
                 }
-                return new Result(result, retries);
+                return result;
             } catch (Exception e) {
-                return new Result(new Response.Failure(e), retries);
+                return new Response.Failure(e);
             }
         };
-    }
-
-    private record Result(Response response, int retries) {
     }
 }
