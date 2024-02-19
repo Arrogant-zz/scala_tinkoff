@@ -15,7 +15,7 @@ public class HandlerImpl implements Handler {
 
     @Override
     public Duration timeout() {
-        return null;
+        return Duration.ofSeconds(3);
     }
 
     @Override
